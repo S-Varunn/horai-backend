@@ -98,6 +98,26 @@ async function initWhatsAppBot() {
         currentQRDataUrl = null;
         connectedPhone = normalizePhone(sock.user?.id || '');
         console.log(`✅ [WhatsApp Bot] Connected successfully as ${connectedPhone || 'Horai Assistant'}`);
+
+        // Automatically link the connected phone to the organization owner if unlinked
+        if (connectedPhone) {
+          (async () => {
+            try {
+              const org = await db('organizations').orderBy('created_at', 'asc').first();
+              if (org?.owner_id) {
+                const owner = await db('users').where({ id: org.owner_id }).first();
+                if (owner && !owner.whatsapp_phone) {
+                  await db('users').where({ id: owner.id }).update({
+                    whatsapp_phone: connectedPhone,
+                    whatsapp_pairing_code: null,
+                    whatsapp_pairing_expires_at: null,
+                  });
+                  console.log(`[WhatsApp Bot] Automatically paired organization owner (${owner.email}) with WhatsApp ${connectedPhone}`);
+                }
+              }
+            } catch (e) {}
+          })();
+        }
       }
 
       if (connection === 'close') {
@@ -126,16 +146,44 @@ async function initWhatsAppBot() {
       }
     });
 
+    const sentBotMessageIds = new Set();
+
+    async function sendBotReply(jid, content) {
+      try {
+        const sent = await sock.sendMessage(jid, content);
+        if (sent?.key?.id) {
+          sentBotMessageIds.add(sent.key.id);
+          if (sentBotMessageIds.size > 1000) {
+            const first = sentBotMessageIds.values().next().value;
+            sentBotMessageIds.delete(first);
+          }
+        }
+        return sent;
+      } catch (e) {
+        console.error('[WhatsApp Bot] Send reply error:', e.message);
+      }
+    }
+
     // ── Inbound Message Handler ───────────────────────────────────────────────
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
 
       for (const msg of messages) {
-        // Skip messages from the bot itself or broadcast/status updates
-        if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
+        if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
 
+        // Skip automated messages sent by the bot itself
+        if (msg.key.id && sentBotMessageIds.has(msg.key.id)) continue;
+
+        const myJid = sock.user?.id || '';
+        const myCleanPhone = normalizePhone(myJid);
         const senderJid = msg.key.remoteJid;
         const cleanSender = normalizePhone(senderJid);
+
+        const isSelfChat = cleanSender === myCleanPhone || senderJid === myJid;
+
+        // If fromMe is true, only allow if it is a Note to Self / Message Yourself chat
+        // Do not process fromMe messages in other normal chats (to avoid interfering with personal conversations)
+        if (msg.key.fromMe && !isSelfChat) continue;
 
         // Extract message text from various Baileys message types
         const rawText = (
@@ -162,7 +210,7 @@ async function initWhatsAppBot() {
             .first();
 
           if (!user) {
-            await sock.sendMessage(senderJid, {
+            await sendBotReply(senderJid, {
               text: '❌ Invalid or expired 6-digit pairing code.\n\nPlease open the Horai web app, click "Link WhatsApp" to get a fresh code, and send it here.',
             });
             continue;
@@ -180,7 +228,7 @@ async function initWhatsAppBot() {
               whatsapp_pairing_expires_at: null,
             });
 
-          await sock.sendMessage(senderJid, {
+          await sendBotReply(senderJid, {
             text: `✅ *Successfully paired!*\n\nWelcome *${user.name}*! Your WhatsApp is now connected to Horai.\n\nYou can now manage events, timesheets, and payroll directly from here, for example:\n• "Whats the rate for Arangettram?"\n• "How much do I owe everyone?"\n• "Who are the members of Arangettram?"\n• "Log 4.5 hours on Arangettram for Sarah"`,
           });
           continue;
@@ -191,23 +239,35 @@ async function initWhatsAppBot() {
           const user = await db('users').where({ whatsapp_phone: cleanSender }).first();
           if (user) {
             await db('users').where({ id: user.id }).update({ whatsapp_phone: null });
-            await sock.sendMessage(senderJid, { text: '✅ Your WhatsApp account has been unlinked from Horai.' });
+            await sendBotReply(senderJid, { text: '✅ Your WhatsApp account has been unlinked from Horai.' });
           } else {
-            await sock.sendMessage(senderJid, { text: 'Your WhatsApp is not linked to any account.' });
+            await sendBotReply(senderJid, { text: 'Your WhatsApp is not linked to any account.' });
           }
           continue;
         }
 
         // 3. Handle Help Command: "HELP"
         if (textUpper === 'HELP') {
-          await sock.sendMessage(senderJid, {
+          await sendBotReply(senderJid, {
             text: `🤖 *Horai Assistant Commands*\n\nTo talk to me, prefix your message with *Horai*, for example:\n• "Horai, whats the rate for Arangettram?"\n• "Horai, how much do I owe everyone?"\n• "Horai, who are the members of Arangettram?"\n• "Horai, log 4 hours on Arangettram for Sarah"\n• "Horai, start session for Arangettram"\n\n• *Unlink Account:* "UNPAIR"`,
           });
           continue;
         }
 
         // 4. Verify User is Paired & check for Pending Confirmation
-        const user = await db('users').where({ whatsapp_phone: cleanSender }).first();
+        let user = await db('users').where({ whatsapp_phone: cleanSender }).first();
+
+        // If user is in self-chat and not yet linked, automatically associate with organization head
+        if (!user && isSelfChat) {
+          const org = await db('organizations').orderBy('created_at', 'asc').first();
+          if (org?.owner_id) {
+            user = await db('users').where({ id: org.owner_id }).first();
+            if (user) {
+              await db('users').where({ id: user.id }).update({ whatsapp_phone: cleanSender });
+            }
+          }
+        }
+
         const pendingAction = user ? getPendingAction(user.id) : null;
         const isConfirmResponse = pendingAction && /^(yes|no|confirm|cancel|y|n|proceed|apply)$/i.test(rawText.trim());
 
@@ -215,14 +275,15 @@ async function initWhatsAppBot() {
         const horaiPrefixMatch = rawText.match(/^(?:(?:@|!)?horai[\s,:]+|[!/])\s*(.*)$/i);
         const mentionsHorai = /\bhorai\b/i.test(rawText);
 
-        // If the message is NOT directed to Horai and NOT a confirmation response, IGNORE it completely (allow normal personal texting)
-        if (!horaiPrefixMatch && !mentionsHorai && !isConfirmResponse) {
+        // In self-chat, allow direct questions OR questions mentioning Horai
+        // In external chats, require explicit Horai prefix or confirmation
+        if (!isSelfChat && !horaiPrefixMatch && !mentionsHorai && !isConfirmResponse) {
           continue;
         }
 
         // 6. If user is not yet paired, invite them to link with their 6-digit code
         if (!user) {
-          await sock.sendMessage(senderJid, {
+          await sendBotReply(senderJid, {
             text: `👋 Welcome to *Horai Assistant*!\n\nYour number (*${cleanSender}*) is not yet linked to a Horai account.\n\n*How to link:*\n1. Open your Horai web app.\n2. Click the WhatsApp icon in the header.\n3. Reply here with:\n👉 *PAIR <6-digit-code>*`,
           });
           continue;
@@ -245,12 +306,12 @@ async function initWhatsAppBot() {
             history: [],
           });
 
-          await sock.sendMessage(senderJid, {
+          await sendBotReply(senderJid, {
             text: result.reply,
           });
         } catch (agentErr) {
           console.error('[WhatsApp Agent Error]:', agentErr);
-          await sock.sendMessage(senderJid, {
+          await sendBotReply(senderJid, {
             text: `⚠️ Sorry, I encountered an error: ${agentErr.message}`,
           });
         }
@@ -264,14 +325,14 @@ async function initWhatsAppBot() {
 }
 
 /**
- * Get current status of the WhatsApp Bot.
+ * Get current WhatsApp Bot connection status and QR code
  */
 function getWhatsAppStatus() {
   return {
     status: botStatus,
+    connected_phone: connectedPhone,
     qr_raw: currentQR,
     qr_data_url: currentQRDataUrl,
-    connected_phone: connectedPhone,
   };
 }
 
@@ -289,13 +350,16 @@ async function requestGatewayPairingCode(phone) {
     throw new Error('WhatsApp Bot is already registered and connected.');
   }
 
-  if (!sock) {
-    await initWhatsAppBot();
-  }
+  // Clear any partial QR auth state so clean pairing handshake occurs
+  try {
+    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+  } catch (e) {}
+
+  await initWhatsAppBot();
 
   // Wait for the socket to reach open WS state
   let attempts = 0;
-  while ((!sock?.ws || sock.ws.readyState !== 1) && attempts < 40) {
+  while ((!sock?.ws || sock.ws.readyState !== 1) && attempts < 50) {
     await new Promise((r) => setTimeout(r, 200));
     attempts++;
   }
@@ -314,10 +378,13 @@ async function requestGatewayPairingCode(phone) {
       raw_code: rawCode,
     };
   } catch (err) {
-    console.log('🔄 Re-initializing WhatsApp socket for pairing code request:', err.message);
+    console.log('🔄 Retrying pairing code request with fresh socket:', err.message);
+    try {
+      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    } catch (e) {}
     await initWhatsAppBot();
     let retryAttempts = 0;
-    while ((!sock?.ws || sock.ws.readyState !== 1) && retryAttempts < 40) {
+    while ((!sock?.ws || sock.ws.readyState !== 1) && retryAttempts < 50) {
       await new Promise((r) => setTimeout(r, 200));
       retryAttempts++;
     }
