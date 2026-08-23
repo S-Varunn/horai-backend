@@ -170,8 +170,12 @@ async function handleGetCollaboratorTimesheet(args, { org, user }) {
     return await handleGetPayrollSummary({}, { org, user });
   }
 
-  const targetUser = await findUserInOrg(org.id, args.collaborator_name_or_email);
-  if (!targetUser) return { error: `Collaborator "${args.collaborator_name_or_email}" not found in organization.` };
+  // If user asked about "me" / "myself" / "my" or left empty, resolve to the current user
+  let targetUser = user;
+  if (nameRaw && !/^(me|myself|i|my|mine)$/i.test(nameRaw)) {
+    targetUser = await findUserInOrg(org.id, args.collaborator_name_or_email);
+    if (!targetUser) return { error: `Collaborator "${args.collaborator_name_or_email}" not found in organization.` };
+  }
 
   // Case 1: Specific event requested
   if (args.event_identifier) {

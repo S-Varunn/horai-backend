@@ -1,9 +1,7 @@
 /**
- * LLM Service supporting multiple providers:
- * - Google Gemini (GEMINI_API_KEY)
- * - OpenAI / OpenAI-compatible (OPENAI_API_KEY, OPENAI_BASE_URL)
- * - Ollama / Local (OLLAMA_BASE_URL, OLLAMA_MODEL)
- * - Fallback intent parser when no API key is configured
+ * @file llmService.js
+ * @description LLM Service supporting Google Gemini, OpenAI, Ollama, and a fully autonomous
+ * Smart Rule-Based Context Engine when LLM APIs are throttled/offline.
  */
 
 async function callOpenAICompatible({ baseUrl, apiKey, model, messages, tools }) {
@@ -25,7 +23,7 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, messages, tools })
       ...(apiKey && apiKey !== 'ollama' ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(6000),
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!res.ok) {
@@ -120,7 +118,7 @@ async function callGemini({ apiKey, model, messages, tools }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(6000),
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!res.ok) {
@@ -158,12 +156,13 @@ async function callGemini({ apiKey, model, messages, tools }) {
 }
 
 /**
- * Fallback intent parser when no external LLM API key is yet configured
+ * Fallback intent parser & context engine when no external LLM is available or rate limited
  */
 function fallbackRuleBasedParser({ messages }) {
   const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
   const toolMsg = [...messages].reverse().find((m) => m.role === 'tool');
 
+  // If a tool has already executed, format its data into a clean, complete response
   if (toolMsg) {
     let toolResult;
     try {
@@ -183,7 +182,7 @@ function fallbackRuleBasedParser({ messages }) {
     }
     if (toolResult.join_link || toolResult.join_code) {
       return {
-        content: `🎫 **Event Details & Join Code for ${toolResult.event_title || 'Event'}:**\n• **Event Code / ID:** \`${toolResult.event_id || toolResult.join_code}\`\n• **Join Link:** ${toolResult.join_link}\n\n*Share this code or link with collaborators so they can view the event and request to join!*`,
+        content: `🎫 **Event Details & Join Code for ${toolResult.event_title || toolResult.title || 'Event'}:**\n• **Event Code / ID:** \`${toolResult.event_id || toolResult.join_code || toolResult.id}\`\n• **Join Link:** ${toolResult.join_link}\n\n*Share this code or link with collaborators so they can view the event and request to join!*`,
         tool_calls: [],
       };
     }
@@ -193,40 +192,221 @@ function fallbackRuleBasedParser({ messages }) {
         tool_calls: [],
       };
     }
-    if (toolResult.members) {
-      if (toolResult.members.length === 0) {
-        return {
-          content: `👥 **${toolResult.organization}** has no other collaborators yet.\nUse *"I want to invite collaborators"* to generate a join link!`,
-          tool_calls: [],
-        };
-      }
-      const list = toolResult.members.map((m) => `• **${m.name}** (${m.email}) - *${m.role}*`).join('\n');
-      return { content: `👥 **Available Members in ${toolResult.organization}:**\n${list}`, tool_calls: [] };
-    }
-    if (toolResult.events) {
-      if (toolResult.events.length === 0) return { content: '📅 You have no events listed.', tool_calls: [] };
-      const list = toolResult.events
-        .map((e) => `• **${e.title}** (${e.event_date || 'No date'}) - Status: *${e.status}* @ $${e.hourly_rate}/hr`)
-        .join('\n');
-      return { content: `📅 **Events:**\n${list}`, tool_calls: [] };
-    }
-    if (toolResult.grand_total !== undefined) {
-      const collabs = (toolResult.collaborators || [])
-        .map((c) => `• **${c.name}**: ${c.hours_worked}h worked | Base: $${c.base_pay} | Total: **$${c.total_owed}**`)
-        .join('\n');
+    // Event Details (get_event_details or get_event_full_context)
+    if (toolResult.title && toolResult.hourly_rate !== undefined) {
+      const collabs = toolResult.collaborators || toolResult.roster || [];
+      const collabsList =
+        collabs.length > 0
+          ? collabs
+              .map(
+                (c) =>
+                  `• **${c.name}** (${c.email || 'collaborator'}) — ${
+                    c.hours_logged ? `${c.hours_logged} hrs logged` : 'Member'
+                  }`
+              )
+              .join('\n')
+          : '• *No collaborators joined yet.*';
+
       return {
-        content: `💰 **Payroll Summary for ${toolResult.event_title}**\nRate: $${toolResult.hourly_rate}/hr | Date: ${toolResult.event_date}\n\n${collabs}\n\n🏆 **Grand Total Payout: $${toolResult.grand_total}**`,
+        content:
+          `✅ 👥 **Team & Event Details for "${toolResult.title}":**\n` +
+          `• **Event Lead:** ${toolResult.lead ? toolResult.lead.name : 'Unassigned'}\n` +
+          `• **Hourly Rate:** $${parseFloat(toolResult.hourly_rate).toFixed(2)}/hr\n` +
+          `• **Date:** ${toolResult.event_date || 'No date set'}\n` +
+          `• **Status:** ${toolResult.status || 'open'}\n\n` +
+          `**Collaborator Roster (${collabs.length}):**\n${collabsList}\n\n` +
+          (toolResult.join_link ? `🎫 **Join Link:** ${toolResult.join_link}` : ''),
         tool_calls: [],
       };
     }
-    return { content: `Done! Result: ${JSON.stringify(toolResult)}`, tool_calls: [] };
+    // Collaborator / Member list (list_collaborators)
+    if (toolResult.members) {
+      if (toolResult.members.length === 0) {
+        return {
+          content: `👥 **${toolResult.organization || 'Your organization'}** has no other collaborators yet.\nUse *"I want to invite collaborators"* to generate a join link!`,
+          tool_calls: [],
+        };
+      }
+      const list = toolResult.members
+        .map(
+          (m) =>
+            `• **${m.name}** (${m.email}) — ${
+              m.is_owner || m.role === 'organizer' ? '👑 Owner / Organizer' : '👤 Collaborator'
+            }`
+        )
+        .join('\n');
+      return {
+        content: `👥 **Team & Collaborators for "${toolResult.organization || 'Organization'}":**\n\n${list}\n\n*Total Members: ${
+          toolResult.count || toolResult.members.length
+        }*`,
+        tool_calls: [],
+      };
+    }
+    // Collaborator Stats / Personal Earnings (get_collaborator_stats or get_collaborator_timesheet)
+    if (
+      toolResult.collaborator &&
+      (toolResult.total_hours !== undefined || toolResult.total_earnings !== undefined || toolResult.grand_total !== undefined)
+    ) {
+      const events = (toolResult.events || toolResult.timesheets || [])
+        .map(
+          (e) =>
+            `• **${e.event_title || e.title}**: ${e.hours_worked || e.hours || 0} hrs @ $${
+              e.hourly_rate || 0
+            }/hr = **$${e.total_owed || e.pay || '0.00'}**`
+        )
+        .join('\n');
+      const grandTotal =
+        toolResult.grand_total !== undefined
+          ? toolResult.grand_total
+          : toolResult.total_earnings || toolResult.total_pay || '0.00';
+      return {
+        content:
+          `📊 **Timesheet & Earnings Summary for ${toolResult.collaborator}:**\n\n` +
+          `• **Total Hours Logged:** ${toolResult.total_hours || 0} hrs\n` +
+          `• **Total Base Pay:** $${toolResult.total_base_pay || toolResult.total_earnings || '0.00'}\n` +
+          (toolResult.total_tips ? `• **Total Tips:** $${toolResult.total_tips}\n` : '') +
+          `• **Grand Total Payout:** **$${grandTotal}**\n\n` +
+          (events ? `**Event Breakdown:**\n${events}` : ''),
+        tool_calls: [],
+      };
+    }
+    // Events List (list_events)
+    if (toolResult.events) {
+      if (toolResult.events.length === 0) return { content: '📅 You have no events listed.', tool_calls: [] };
+      const list = toolResult.events
+        .map(
+          (e) =>
+            `• **${e.title}** (${e.event_date || 'No date'}) — *${e.status || 'open'}* @ **$${parseFloat(
+              e.hourly_rate || 0
+            ).toFixed(2)}/hr** (${e.collaborator_count || 0} members)`
+        )
+        .join('\n');
+      return { content: `📅 **Organization Events:**\n\n${list}`, tool_calls: [] };
+    }
+    // Payroll Summary (get_payroll_summary)
+    if (toolResult.grand_total !== undefined && toolResult.collaborators) {
+      const collabs = (toolResult.collaborators || [])
+        .map(
+          (c) =>
+            `• **${c.name}**: ${c.hours_worked || 0}h worked | Base: $${c.base_pay || 0} | Total: **$${c.total_owed || 0}**`
+        )
+        .join('\n');
+      return {
+        content:
+          `💰 **Payroll Summary for ${toolResult.event_title || 'Organization'}:**\n` +
+          (toolResult.hourly_rate ? `Rate: $${toolResult.hourly_rate}/hr | Date: ${toolResult.event_date || 'N/A'}\n\n` : '\n') +
+          `${collabs}\n\n🏆 **Grand Total Payout: $${toolResult.grand_total}**`,
+        tool_calls: [],
+      };
+    }
+    // Organization Overview (get_organization_overview)
+    if (toolResult.organization && (toolResult.active_events || toolResult.total_members)) {
+      const eventsList = (toolResult.active_events || [])
+        .map((e) => `• **${e.title}** (${e.event_date || 'No date'}) @ $${e.hourly_rate}/hr`)
+        .join('\n');
+      return {
+        content:
+          `🏢 **Overview for "${toolResult.organization.name || toolResult.organization}":**\n` +
+          `• **Total Members:** ${toolResult.total_members || 0}\n` +
+          `• **Total Active Events:** ${(toolResult.active_events || []).length}\n\n` +
+          (eventsList ? `**Upcoming Events:**\n${eventsList}` : ''),
+        tool_calls: [],
+      };
+    }
+
+    return { content: `✅ Request processed successfully.`, tool_calls: [] };
   }
 
   const rawText = (lastUserMsg?.content || '').trim();
   const text = rawText.toLowerCase();
 
-  // 0. Collaborator Timesheet query: "How much do I need to pay tharun for the event Arangettram?"
-  const collabTimeMatch = rawText.match(/(?:show\s+time\s+(?:that\s+)?|how\s+much\s+(?:time\s+did\s+|do\s+i\s+(?:need\s+to\s+)?pay\s+|should\s+i\s+pay\s+|to\s+pay\s+|is\s+owed\s+to\s+|payout\s+for\s+)|show\s+hours\s+for\s+|timesheet\s+for\s+|payout\s+for\s+)(["']?[a-zA-Z0-9\s_@.-]+?["']?)\s+(?:worked\s+(?:for|on|at)\s+(?:the\s+)?(?:event\s+)?|work\s+on\s+(?:the\s+)?(?:event\s+)?|on\s+(?:the\s+)?(?:event\s+)?|for\s+(?:the\s+)?(?:event\s+)?)(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i);
+  // 1. Specific Event Member/Roster Query: "Who are the members of Arangettram?"
+  const eventMembersMatch = rawText.match(
+    /(?:who\s+(?:is|are)\s+(?:the\s+)?(?:members|team|collaborators|working)\s+(?:of|on|in|for)|show\s+(?:the\s+)?(?:members|team|roster|collaborators)\s+(?:of|for|on)|(?:members|team|roster|collaborators)\s+(?:of|for|on))\s+(?:the\s+)?(?:event\s+)?(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i
+  );
+  if (eventMembersMatch) {
+    const rawTarget = eventMembersMatch[1].replace(/["']/g, '').trim();
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_event_members',
+          type: 'function',
+          function: {
+            name: 'get_event_details',
+            arguments: JSON.stringify({ event_identifier: rawTarget }),
+          },
+        },
+      ],
+    };
+  }
+
+  // 2. Generic Member / Collaborators / Team Query:
+  // "Who are the members?", "Who are all the collaborators?", "Who are working with me?", "Show members", "Team members"
+  if (
+    /(?:who\s+(?:are|is)\s+(?:all\s+)?(?:the\s+)?(?:collaborators|members|team|people|working)|who\s+(?:is|are)\s+working\s+(?:with\s+me|today|on\s+events)|show\s+(?:all\s+)?(?:the\s+)?(?:members|collaborators|team|roster)|list\s+(?:all\s+)?(?:the\s+)?(?:members|collaborators|team)|who\s+all\s+are\s+the\s+members|who\s+are\s+all\s+the\s+collaborators|members\b|collaborators\b)/i.test(
+      text
+    )
+  ) {
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_list_collabs',
+          type: 'function',
+          function: { name: 'list_collaborators', arguments: '{}' },
+        },
+      ],
+    };
+  }
+
+  // 3. Personal Pay / Earnings / Hours Query:
+  // "How much am I getting paid?", "How much am I making?", "What is my pay?", "Show my hours", "My earnings"
+  if (
+    /(?:how\s+much\s+(?:am\s+i|do\s+i|will\s+i|can\s+i)\s+(?:getting\s+)?(?:paid|make|earning|owed|getting)|what\s+(?:is|are)\s+my\s+(?:pay|rate|hours|earnings|timesheet|wage)|show\s+my\s+(?:hours|pay|earnings|timesheet|rate)|my\s+(?:hours|pay|earnings|timesheet|rate)|how\s+many\s+hours\s+did\s+i\s+work)/i.test(
+      text
+    )
+  ) {
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_my_stats',
+          type: 'function',
+          function: {
+            name: 'get_collaborator_timesheet',
+            arguments: JSON.stringify({ collaborator_name_or_email: 'me' }),
+          },
+        },
+      ],
+    };
+  }
+
+  // 4. Rate inquiry for a specific event: "Whats the rate for Arangettram?"
+  const rateInquiryMatch = rawText.match(
+    /(?:what\s+is\s+(?:the\s+)?|whats\s+(?:the\s+)?|how\s+much\s+is\s+(?:the\s+)?|show\s+(?:the\s+)?|check\s+(?:the\s+)?)?(?:rate|hourly\s+rate|rate\s+per\s+hour|pay\s+rate)\s+(?:for|of|on)\s+(?:the\s+)?(?:event\s+)?(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i
+  );
+  if (rateInquiryMatch) {
+    const rawTarget = rateInquiryMatch[1].replace(/["']/g, '').trim();
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_event_rate',
+          type: 'function',
+          function: {
+            name: 'get_event_details',
+            arguments: JSON.stringify({ event_identifier: rawTarget }),
+          },
+        },
+      ],
+    };
+  }
+
+  // 5. Collaborator Specific Event Timesheet query: "How much do I need to pay Sarah for Arangettram?"
+  const collabTimeMatch = rawText.match(
+    /(?:show\s+time\s+(?:that\s+)?|how\s+much\s+(?:time\s+did\s+|do\s+i\s+(?:need\s+to\s+)?pay\s+|should\s+i\s+pay\s+|to\s+pay\s+|is\s+owed\s+to\s+|payout\s+for\s+)|show\s+hours\s+for\s+|timesheet\s+for\s+|payout\s+for\s+)(["']?[a-zA-Z0-9\s_@.-]+?["']?)\s+(?:worked\s+(?:for|on|at)\s+(?:the\s+)?(?:event\s+)?|work\s+on\s+(?:the\s+)?(?:event\s+)?|on\s+(?:the\s+)?(?:event\s+)?|for\s+(?:the\s+)?(?:event\s+)?)(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i
+  );
   if (collabTimeMatch) {
     const rawUser = collabTimeMatch[1].replace(/["']/g, '').trim();
     const rawEvent = collabTimeMatch[2].replace(/["']/g, '').trim();
@@ -248,8 +428,10 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 0b. Collaborator Org-Wide Payout query: "How much do I owe tharun?" / "What do I owe tharun?"
-  const orgWideOweMatch = rawText.match(/(?:how\s+much\s+(?:do\s+i\s+owe|is\s+owed\s+to|should\s+i\s+pay)|what\s+do\s+i\s+owe|total\s+owed\s+to|total\s+payout\s+for)\s+(["']?[a-zA-Z0-9\s_@.-]+?["']?)(?:\?)?$/i);
+  // 6. Collaborator Org-Wide Payout query: "How much do I owe Sarah?" / "What do I owe Sarah?"
+  const orgWideOweMatch = rawText.match(
+    /(?:how\s+much\s+(?:do\s+i\s+owe|is\s+owed\s+to|should\s+i\s+pay)|what\s+do\s+i\s+owe|total\s+owed\s+to|total\s+payout\s+for)\s+(["']?[a-zA-Z0-9\s_@.-]+?["']?)(?:\?)?$/i
+  );
   if (orgWideOweMatch) {
     const rawUser = orgWideOweMatch[1].replace(/["']/g, '').trim();
     return {
@@ -269,8 +451,30 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 1. List events
-  if (/list\s+events?|show\s+events?|my\s+events?|all\s+events?/i.test(text)) {
+  // 7. Overall Payroll Summary / What do I owe everyone:
+  if (
+    /(?:how\s+much\s+(?:do\s+i|should\s+i|to)\s+owe(?:\s+everyone|\s+all|\s+people)?|what\s+do\s+i\s+owe(?:\s+everyone|\s+all)?|payroll\s+summary|total\s+payroll|total\s+owed\s+across|payouts\s+summary|how\s+much\s+money\s+do\s+i\s+owe)/i.test(
+      text
+    )
+  ) {
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_payroll_summary',
+          type: 'function',
+          function: { name: 'get_payroll_summary', arguments: '{}' },
+        },
+      ],
+    };
+  }
+
+  // 8. List Events Query: "What events do we have?", "List events", "Show events"
+  if (
+    /(?:what\s+events\s+(?:do\s+we\s+have|are\s+there|exist)|list\s+events?|show\s+events?|my\s+events?|all\s+events?|what\s+are\s+the\s+events|events\b)/i.test(
+      text
+    )
+  ) {
     return {
       content: '',
       tool_calls: [
@@ -283,8 +487,10 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 2. Event code / join code / join link / invite link for an event:
-  const eventCodeMatch = text.match(/(?:(?:give\s+me|get|what\s+is|show)\s+(?:the\s+)?)?(?:join\s+code|event\s+code|code|join\s+link|share\s+link|request\s+link|invite\s+collaborators|link)\s+(?:for|to|of|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+?)(?:\s+event)?$/i);
+  // 9. Event code / join code / join link / invite link for an event:
+  const eventCodeMatch = text.match(
+    /(?:(?:give\s+me|get|what\s+is|show)\s+(?:the\s+)?)?(?:join\s+code|event\s+code|code|join\s+link|share\s+link|request\s+link|invite\s+collaborators|link)\s+(?:for|to|of|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+?)(?:\s+event)?$/i
+  );
   if (eventCodeMatch) {
     const rawTarget = eventCodeMatch[1].trim();
     return {
@@ -302,46 +508,10 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 2b. Rate inquiry: "Whats the rate per hour for event arangetam"
-  const rateInquiryMatch = rawText.match(/(?:what\s+is\s+(?:the\s+)?|whats\s+(?:the\s+)?|how\s+much\s+is\s+(?:the\s+)?|show\s+(?:the\s+)?|check\s+(?:the\s+)?)?(?:rate|hourly\s+rate|rate\s+per\s+hour|pay\s+rate)\s+(?:for|of|on)\s+(?:the\s+)?(?:event\s+)?(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i);
-  if (rateInquiryMatch) {
-    const rawTarget = rateInquiryMatch[1].replace(/["']/g, '').trim();
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_event_rate',
-          type: 'function',
-          function: {
-            name: 'get_event_details',
-            arguments: JSON.stringify({ event_identifier: rawTarget }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 2c. Event members / roster query: "Who are the members of arangettram?"
-  const eventMembersMatch = rawText.match(/(?:who\s+(?:is|are)\s+(?:the\s+)?(?:members|team|collaborators|working)\s+(?:of|on|in|for)|show\s+(?:the\s+)?(?:members|team|roster|collaborators)\s+(?:of|for|on)|(?:members|team|roster|collaborators)\s+(?:of|for|on))\s+(?:the\s+)?(?:event\s+)?(["']?[a-zA-Z0-9\s_-]+?["']?)(?:\s+event)?(?:\?)?$/i);
-  if (eventMembersMatch) {
-    const rawTarget = eventMembersMatch[1].replace(/["']/g, '').trim();
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_event_members',
-          type: 'function',
-          function: {
-            name: 'get_event_details',
-            arguments: JSON.stringify({ event_identifier: rawTarget }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 3. Rate update: "change rate for Gala to $35/hr" / "set rate for Gala to 40"
-  const rateUpdateMatch = text.match(/(?:change|update|set)\s+(?:the\s+)?(?:rate|hourly\s+rate|pay)\s+(?:for|of|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+?)\s+to\s+\$?(\d+(?:\.\d+)?)(?:\s*(?:\/hr|\/hour|per\s+hour|dollars?))?/i);
+  // 10. Rate update: "change rate for Gala to $35/hr" / "set rate for Gala to 40"
+  const rateUpdateMatch = text.match(
+    /(?:change|update|set)\s+(?:the\s+)?(?:rate|hourly\s+rate|pay)\s+(?:for|of|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+?)\s+to\s+\$?(\d+(?:\.\d+)?)(?:\s*(?:\/hr|\/hour|per\s+hour|dollars?))?/i
+  );
   if (rateUpdateMatch) {
     return {
       content: '',
@@ -361,37 +531,10 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 4. Date update: "change date of Gala to 2026-09-01" / "reschedule Gala to next Saturday"
-  const dateUpdateMatch = text.match(/(?:change|update|set|reschedule)\s+(?:the\s+)?(?:date)\s+(?:for|of|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+?)\s+to\s+([a-zA-Z0-9\s_-]+)/i);
-  if (dateUpdateMatch) {
-    let dateStr = dateUpdateMatch[2].trim();
-    if (dateStr === 'tomorrow') {
-      const tom = new Date();
-      tom.setDate(tom.getDate() + 1);
-      dateStr = tom.toISOString().split('T')[0];
-    } else if (dateStr === 'today') {
-      dateStr = new Date().toISOString().split('T')[0];
-    }
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_update_date',
-          type: 'function',
-          function: {
-            name: 'update_event',
-            arguments: JSON.stringify({
-              event_identifier: dateUpdateMatch[1].trim(),
-              event_date: dateStr,
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 5. Assign Event Lead: "set Sarah as lead for Gala" / "assign Alex as lead on Gala"
-  const leadAssignMatch = text.match(/(?:set|assign|appoint)\s+([a-zA-Z0-9\s_@.-]+?)\s+as\s+(?:the\s+)?(?:event\s+)?lead\s+(?:for|on|of|to)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
+  // 11. Assign Event Lead: "set Sarah as lead for Gala"
+  const leadAssignMatch = text.match(
+    /(?:set|assign|appoint)\s+([a-zA-Z0-9\s_@.-]+?)\s+as\s+(?:the\s+)?(?:event\s+)?lead\s+(?:for|on|of|to)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i
+  );
   if (leadAssignMatch) {
     return {
       content: '',
@@ -411,153 +554,10 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 6. Remove Event Lead: "remove lead for Gala" / "unassign lead from Gala"
-  const leadRemoveMatch = text.match(/(?:remove|unassign|clear)\s+(?:event\s+)?lead\s+(?:for|from|on|of)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (leadRemoveMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_remove_lead',
-          type: 'function',
-          function: {
-            name: 'remove_event_lead',
-            arguments: JSON.stringify({
-              event_identifier: leadRemoveMatch[1].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 7. Set tip: "set $30 tip for Sarah on Gala" / "give $25 tip to Alex for Gala"
-  const tipMatch = text.match(/(?:set|add|give|update)\s+\$?(\d+(?:\.\d+)?)\s+tip\s+(?:for|to)\s+([a-zA-Z0-9\s_@.-]+?)\s+(?:for|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (tipMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_set_tip',
-          type: 'function',
-          function: {
-            name: 'set_tip',
-            arguments: JSON.stringify({
-              tip_amount: parseFloat(tipMatch[1]),
-              collaborator_name_or_email: tipMatch[2].trim(),
-              event_identifier: tipMatch[3].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 8. Remove tip: "remove tip for Sarah on Gala"
-  const tipRemoveMatch = text.match(/(?:remove|delete|clear)\s+tip\s+(?:for|from)\s+([a-zA-Z0-9\s_@.-]+?)\s+(?:for|on)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (tipRemoveMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_remove_tip',
-          type: 'function',
-          function: {
-            name: 'remove_tip',
-            arguments: JSON.stringify({
-              collaborator_name_or_email: tipRemoveMatch[1].trim(),
-              event_identifier: tipRemoveMatch[2].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 9. Review expense: "approve Sarah's expense on Gala" / "reject Alex's expense on Gala"
-  const reviewExpenseMatch = text.match(/(approve|reject)\s+(?:expense\s+(?:for\s+)?)?([a-zA-Z0-9\s_@.-]+?)(?:'s)?\s+expense\s+(?:on|for)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (reviewExpenseMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_review_expense',
-          type: 'function',
-          function: {
-            name: 'review_expense',
-            arguments: JSON.stringify({
-              decision: reviewExpenseMatch[1].toLowerCase() === 'approve' ? 'approved' : 'rejected',
-              collaborator_name_or_email: reviewExpenseMatch[2].trim(),
-              event_identifier: reviewExpenseMatch[3].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 10. Delete expense: "delete my expense on Gala"
-  const deleteExpenseMatch = text.match(/(?:delete|cancel|remove)\s+(?:my\s+)?(?:pending\s+)?expense\s+(?:on|for)\s+(?:the\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (deleteExpenseMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_delete_expense',
-          type: 'function',
-          function: {
-            name: 'delete_expense',
-            arguments: JSON.stringify({
-              event_identifier: deleteExpenseMatch[1].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 11. Rename organization: "rename organization to Premier Events"
-  const renameOrgMatch = rawText.match(/(?:rename|change\s+name\s+of)\s+(?:my\s+)?(?:org|organization)\s+to\s+([a-zA-Z0-9\s_-]+)/i);
-  if (renameOrgMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_update_org',
-          type: 'function',
-          function: {
-            name: 'update_organization',
-            arguments: JSON.stringify({
-              name: renameOrgMatch[1].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 12. Remove organization member: "remove member Sarah from organization"
-  const removeOrgMemberMatch = text.match(/(?:remove|kick)\s+(?:member\s+)?([a-zA-Z0-9\s_@.-]+?)\s+from\s+(?:the\s+)?(?:org|organization)/i);
-  if (removeOrgMemberMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_remove_org_member',
-          type: 'function',
-          function: {
-            name: 'remove_organization_member',
-            arguments: JSON.stringify({
-              collaborator_name_or_email: removeOrgMemberMatch[1].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 13. Create event regex: "create event [name] on [date] at $[rate]"
-  const createMatch = text.match(/create\s+event\s+([a-zA-Z0-9\s_-]+?)(?:\s+(?:on|for|at)\s+(\d{4}-\d{2}-\d{2}|today|tomorrow|\w+\s+\d+))?(?:\s+(?:at|for|rate)\s+\$?(\d+(?:\.\d{2})?))?$/i);
+  // 12. Create event: "create event [name] on [date] at $[rate]"
+  const createMatch = text.match(
+    /create\s+event\s+([a-zA-Z0-9\s_-]+?)(?:\s+(?:on|for|at)\s+(\d{4}-\d{2}-\d{2}|today|tomorrow|\w+\s+\d+))?(?:\s+(?:at|for|rate)\s+\$?(\d+(?:\.\d{2})?))?$/i
+  );
   if (createMatch) {
     const title = createMatch[1].trim();
     let dateStr = createMatch[2] ? createMatch[2].trim() : '';
@@ -590,7 +590,7 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 14. Start session / timer: "start session for [event]"
+  // 13. Start session / timer: "start session for [event]"
   const startMatch = text.match(/start\s+(?:session|timer)\s+(?:for\s+)?([a-zA-Z0-9\s_-]+)/i);
   if (startMatch) {
     return {
@@ -600,7 +600,7 @@ function fallbackRuleBasedParser({ messages }) {
           id: 'call_fallback_start_session',
           type: 'function',
           function: {
-            name: 'start_session',
+            name: 'start_timer',
             arguments: JSON.stringify({ event_identifier: startMatch[1].trim() }),
           },
         },
@@ -608,7 +608,7 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 15. Stop session / timer: "stop session for [event]"
+  // 14. Stop session / timer: "stop session for [event]"
   const stopMatch = text.match(/stop\s+(?:session|timer)\s+(?:for\s+)?([a-zA-Z0-9\s_-]+)/i);
   if (stopMatch) {
     return {
@@ -618,7 +618,7 @@ function fallbackRuleBasedParser({ messages }) {
           id: 'call_fallback_stop_session',
           type: 'function',
           function: {
-            name: 'stop_session',
+            name: 'stop_timer',
             arguments: JSON.stringify({ event_identifier: stopMatch[1].trim() }),
           },
         },
@@ -626,66 +626,23 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 16. Payroll summary: "summary for [event]" or "payroll for [event]"
-  const summaryMatch = text.match(/(?:summary|payroll|payout|payroll\s+summary|hours\s+summary)\s+(?:for\s+)?([a-zA-Z0-9\s_-]+)/i);
-  if (summaryMatch) {
+  // 15. Manual hours logging: "log 4.5 hours on Gala for Sarah"
+  const logMatch = text.match(
+    /(?:log|add|record)\s+(\d+(?:\.\d+)?)\s+(?:hours?|hrs?)\s+(?:on|for)\s+([a-zA-Z0-9\s_-]+?)(?:\s+(?:for|to)\s+([a-zA-Z0-9\s_@.-]+))?$/i
+  );
+  if (logMatch) {
     return {
       content: '',
       tool_calls: [
         {
-          id: 'call_fallback_get_payroll_summary',
+          id: 'call_fallback_log_hours',
           type: 'function',
           function: {
-            name: 'get_payroll_summary',
-            arguments: JSON.stringify({ event_identifier: summaryMatch[1].trim() }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 17. List collaborators / team / members
-  if (/(?:list\s+(?:of\s+)?(?:all\s+)?(?:my\s+)?(?:team|members|collaborators)|who\s+(?:is|are)\s+(?:in\s+my\s+team|my\s+members|available)|show\s+(?:all\s+)?(?:my\s+)?(?:members|collaborators)|all\s+my\s+members)/i.test(text)) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_list_collabs',
-          type: 'function',
-          function: { name: 'list_collaborators', arguments: '{}' },
-        },
-      ],
-    };
-  }
-
-  // 18. General invite collaborators / invite link
-  if (/invite\s+collaborators|generate\s+(?:invite\s+)?link|invite\s+members/i.test(text)) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_org_invite',
-          type: 'function',
-          function: { name: 'create_organization_invite_link', arguments: '{}' },
-        },
-      ],
-    };
-  }
-
-  // 19. Invite specific collaborator: "invite [name] to [event]"
-  const inviteMatch = text.match(/invite\s+([a-zA-Z0-9\s_@.-]+?)\s+to\s+([a-zA-Z0-9\s_-]+)/i);
-  if (inviteMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_invite',
-          type: 'function',
-          function: {
-            name: 'invite_collaborator_to_event',
+            name: 'log_manual_time',
             arguments: JSON.stringify({
-              collaborator_name_or_email: inviteMatch[1].trim(),
-              event_identifier: inviteMatch[2].trim(),
+              hours: parseFloat(logMatch[1]),
+              event_identifier: logMatch[2].trim(),
+              collaborator_name_or_email: logMatch[3] ? logMatch[3].trim() : undefined,
             }),
           },
         },
@@ -693,8 +650,8 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 20. Join requests: "requests for [event]" or "join requests for [event]"
-  const reqMatch = text.match(/(?:join\s+)?requests\s+(?:for\s+)?([a-zA-Z0-9\s_-]+)/i);
+  // 16. Join requests query: "join requests for Gala"
+  const reqMatch = text.match(/(?:show|list|get|view)?\s*(?:pending\s+)?join\s+requests\s+(?:for\s+)?([a-zA-Z0-9\s_-]+)/i);
   if (reqMatch) {
     return {
       content: '',
@@ -711,74 +668,19 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
-  // 21. Accept / Reject join request: "accept [name] for [event]"
-  const reviewMatch = text.match(/(accept|reject)\s+([a-zA-Z0-9\s_@.-]+?)\s+(?:for|to|on)\s+([a-zA-Z0-9\s_-]+)/i);
-  if (reviewMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_review_req',
-          type: 'function',
-          function: {
-            name: 'review_join_request',
-            arguments: JSON.stringify({
-              decision: reviewMatch[1].toLowerCase() === 'accept' ? 'accepted' : 'rejected',
-              collaborator_name_or_email: reviewMatch[2].trim(),
-              event_identifier: reviewMatch[3].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 22. Adjust hours / modify time: "adjust hours for [name] on [event] to [hours]"
-  const adjustMatch = text.match(/(?:adjust|modify|update|change)\s+(?:hours|time)\s+(?:for\s+)?([a-zA-Z0-9\s_@.-]+?)\s+(?:on|for)\s+([a-zA-Z0-9\s_-]+?)\s+to\s+(\d+(?:\.\d+)?)/i);
-  if (adjustMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_modify_time',
-          type: 'function',
-          function: {
-            name: 'modify_time_entry',
-            arguments: JSON.stringify({
-              collaborator_name_or_email: adjustMatch[1].trim(),
-              event_identifier: adjustMatch[2].trim(),
-              new_hours: parseFloat(adjustMatch[3]),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
-  // 23. Delete time entry: "delete time entry for [name] on [event]"
-  const deleteTimeMatch = text.match(/(?:delete|remove)\s+(?:time\s+entry|hours)\s+(?:for\s+)?([a-zA-Z0-9\s_@.-]+?)\s+(?:on|for)\s+([a-zA-Z0-9\s_-]+)/i);
-  if (deleteTimeMatch) {
-    return {
-      content: '',
-      tool_calls: [
-        {
-          id: 'call_fallback_delete_time',
-          type: 'function',
-          function: {
-            name: 'delete_time_entry',
-            arguments: JSON.stringify({
-              collaborator_name_or_email: deleteTimeMatch[1].trim(),
-              event_identifier: deleteTimeMatch[2].trim(),
-            }),
-          },
-        },
-      ],
-    };
-  }
-
+  // 17. General Overview fallback for general questions / greetings:
   return {
-    content: `👋 I received: "${lastUserMsg?.content}".\n\n*Available Commands:*\n• "Show available members in my organization"\n• "Create event Gala on Friday for $30/hr"\n• "Get join link for Gala"\n• "Start session for Gala" / "Stop session for Gala"\n• "Log 4.5 hours on Gala for Sarah"\n• "Payroll summary for Gala"\n• "Join requests for Gala"`,
-    tool_calls: [],
+    content: '',
+    tool_calls: [
+      {
+        id: 'call_fallback_overview',
+        type: 'function',
+        function: {
+          name: 'get_organization_overview',
+          arguments: '{}',
+        },
+      },
+    ],
   };
 }
 
@@ -793,7 +695,7 @@ async function chatCompletion({ messages, tools }) {
     try {
       return await callGemini({
         apiKey: process.env.GEMINI_API_KEY,
-        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+        model: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
         messages,
         tools,
       });
@@ -834,7 +736,7 @@ async function chatCompletion({ messages, tools }) {
     }
   }
 
-  // 4. Built-in Smart Fallback Parser
+  // 4. Built-in Smart Intent & Context Engine
   return fallbackRuleBasedParser({ messages, tools });
 }
 
