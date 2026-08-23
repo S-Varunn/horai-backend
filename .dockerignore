@@ -1,0 +1,8 @@
+node_modules
+npm-debug.log
+data/*
+!data/whatsapp_auth
+.git
+.env
+.DS_Store
+*.log

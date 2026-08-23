@@ -163,4 +163,35 @@ router.delete('/orgs/:id/invite-links/:linkId', requireAuth, requireRole('organi
   } catch (err) { next(err); }
 });
 
+// DELETE /api/orgs/:id — Delete organization and all its data (owner only)
+router.delete('/orgs/:id', requireAuth, requireRole('organizer'), async (req, res, next) => {
+  try {
+    if (!(await isOwner(req.params.id, req.user.id))) {
+      return res.status(403).json({ error: 'Only the organization owner can delete this organization' });
+    }
+
+    const org = await db('organizations').where({ id: req.params.id }).first();
+    if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+    await db.transaction(async (trx) => {
+      // Find all event ids
+      const eventIds = await trx('events').where({ org_id: req.params.id }).pluck('id');
+      if (eventIds.length > 0) {
+        await trx('collaborator_tips').whereIn('event_id', eventIds).del();
+        await trx('expenses').whereIn('event_id', eventIds).del();
+        await trx('collaborator_time_entries').whereIn('event_id', eventIds).del();
+        await trx('time_sessions').whereIn('event_id', eventIds).del();
+        await trx('event_invitations').whereIn('event_id', eventIds).del();
+        await trx('events').where({ org_id: req.params.id }).del();
+      }
+
+      await trx('org_invite_links').where({ org_id: req.params.id }).del();
+      await trx('organization_members').where({ org_id: req.params.id }).del();
+      await trx('organizations').where({ id: req.params.id }).del();
+    });
+
+    res.json({ message: 'Organization and all associated data deleted successfully', id: req.params.id });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

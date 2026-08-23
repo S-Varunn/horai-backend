@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Timesheet Tracker Smooth Setup Script
+# Horai Backend Smooth Setup Script
 # Works on any Linux/macOS environment with Node.js and PostgreSQL
 
 set -e # Exit immediately if a command exits with a non-zero status
@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 clear
 
 echo -e "${CYAN}${BOLD}=====================================================${NC}"
-echo -e "${CYAN}${BOLD}   🕒  Welcome to the Timesheet Tracker Setup  🕒   ${NC}"
+echo -e "${CYAN}${BOLD}   ⏳  Welcome to the Horai Backend Setup  ⏳   ${NC}"
 echo -e "${CYAN}${BOLD}=====================================================${NC}"
 echo -e "This script will guide you through setting up your workspace on your new laptop."
 echo ""
@@ -78,7 +78,7 @@ if [ ! -f ".env.example" ]; then
 # Database
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=timesheet_tracker
+DB_NAME=horai_db
 DB_USER=postgres
 DB_PASSWORD=your_postgres_password
 
@@ -122,8 +122,8 @@ if [ "$ENV_EXISTS" = "false" ]; then
     read -p "Database Port [5432]: " DB_PORT
     DB_PORT=${DB_PORT:-5432}
     
-    read -p "Database Name [timesheet_tracker]: " DB_NAME
-    DB_NAME=${DB_NAME:-timesheet_tracker}
+    read -p "Database Name [horai_db]: " DB_NAME
+    DB_NAME=${DB_NAME:-horai_db}
     
     read -p "Database User [postgres]: " DB_USER
     DB_USER=${DB_USER:-postgres}
@@ -244,7 +244,7 @@ fi
 # Setup Complete Summary
 # -----------------------------------------------------------------
 echo -e "${GREEN}${BOLD}=====================================================${NC}"
-echo -e "${GREEN}${BOLD} 🎉  Setup Complete! Timesheet Tracker is Ready!  🎉 ${NC}"
+echo -e "${GREEN}${BOLD} 🎉  Setup Complete! Horai Backend is Ready!  🎉 ${NC}"
 echo -e "${GREEN}${BOLD}=====================================================${NC}"
 echo ""
 echo -e "You can now run the following commands to start working:"

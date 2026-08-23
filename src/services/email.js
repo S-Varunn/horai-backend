@@ -14,7 +14,7 @@ async function send2FACode(email, code) {
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
   });
   await transporter.sendMail({
-    from: '"Timesheet Tracker" <noreply@timesheet.tracker>',
+    from: '"Horai" <noreply@horai.app>',
     to: email,
     subject: "Your 2FA Verification Code",
     text: `Your verification code is: ${code}. It expires in 10 minutes.`,

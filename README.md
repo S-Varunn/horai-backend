@@ -1,185 +1,203 @@
-# Timesheet Tracker — Backend
+# ⏳ Horai — Backend API & AI Bot Service
 
-Node.js + PostgreSQL REST API for the Timesheet Tracker app.
-
----
-
-## Prerequisites
-
-- Node.js 18+
-- PostgreSQL 14+
-- ngrok (for exposing to the internet)
+Modern Node.js + PostgreSQL REST API with native WhatsApp and Discord AI Assistant integrations for **Horai** — the autonomous event operations, time logging, expense management, and payroll platform.
 
 ---
 
-## Setup
+## 🚀 Overview
 
-### Recommended: Quick Automated Setup
+Horai Backend provides the centralized engine for:
+* **Event & Session Management**: Real-time collaborative clock-in/out sessions, manual time entries, and retroactive hour adjustments.
+* **Expense Tracking & Reimbursements**: Mileage calculations, driver vs passenger rate splits, materials, and organizer approval workflows.
+* **Automated Payroll & Tip Engine**: Instant per-collaborator wage breakdowns, travel compensations, tips, and financial audit logs.
+* **Native WhatsApp AI Assistant**: Multi-device Baileys gateway supporting prefix filtering (`Horai, ...`), pairing codes, and autonomous tool calling.
+* **Official Discord Bot Integration**: Direct slash command and natural language event operations inside Discord guilds.
+* **Security & Auth**: Role-based access control (RBAC), bcrypt hashing, JWT Bearer authentication, and optional email 2FA.
 
-You can set up the entire workspace (installing dependencies, creating the database, generating a secure `.env` file, and running database migrations) smoothly with a single interactive command:
+---
 
+## 🛠️ Prerequisites
+
+* **Node.js**: 18+ (Node 20+ recommended)
+* **PostgreSQL**: 14+
+* **npm**: 9+
+
+---
+
+## 📦 Setup & Installation
+
+### Option 1: Automated Script Setup
+
+Run the interactive setup script for your platform:
+
+#### 💻 Windows (PowerShell)
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\setup.ps1
+```
+
+#### 🐧 Linux / 🍎 macOS (Bash)
 ```bash
 ./setup.sh
 ```
 
 ---
 
-### Alternative: Manual Setup
+### Option 2: Manual Setup
 
-If you prefer to set up the project step-by-step, follow these instructions:
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
 
-#### 1. Install dependencies
+2. **Create the PostgreSQL database**:
+   ```bash
+   psql -U postgres -c "CREATE DATABASE horai_db;"
+   ```
 
-```bash
-npm install
-```
+3. **Configure environment variables**:
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` and fill in your configuration:
+   ```env
+   PORT=3000
+   NODE_ENV=development
+   DB_HOST=localhost
+   DB_PORT=5432
+   DB_NAME=horai_db
+   DB_USER=postgres
+   DB_PASSWORD=your_password
+   JWT_SECRET=your_super_secret_jwt_key_here
+   GEMINI_API_KEY=your_gemini_api_key
+   DISCORD_BOT_TOKEN=your_discord_bot_token
+   ```
 
-#### 2. Create the database
+4. **Run database migrations**:
+   ```bash
+   npm run migrate
+   ```
 
-```bash
-psql -U postgres -c "CREATE DATABASE timesheet_tracker;"
-```
+5. **Start the server**:
+   ```bash
+   # Development (with nodemon auto-restart)
+   npm run dev
 
-#### 3. Configure environment
+   # Production
+   npm run start:prod
+   ```
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your database credentials:
-
-```
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=timesheet_tracker
-DB_USER=postgres
-DB_PASSWORD=your_postgres_password
-JWT_SECRET=some_long_random_string_here
-```
-
-#### 4. Run migrations
-
-```bash
-npm run migrate
-```
-
-#### 5. Start the server
-
-```bash
-# Development (auto-restart on changes)
-npm run dev
-
-# Production
-npm start
-```
-
-The API will be live at: `http://localhost:3000`
+   The API will be live at: `http://localhost:3000`
 
 ---
 
-## Exposing via ngrok
+## ☁️ Production Deployment & Hosting
 
+### Railway (Recommended)
+1. Link repository `S-Varunn/horai-backend`.
+2. Add a **PostgreSQL** database service in Railway.
+3. Set environment variables (`DATABASE_URL`, `JWT_SECRET`, `DISCORD_BOT_TOKEN`, `GEMINI_API_KEY`).
+4. Attach a Volume to `/app/data/whatsapp_auth` for WhatsApp session persistence.
+5. Deploy! `npm run start:prod` automatically runs Knex migrations on startup.
+
+### Render
+1. Create a **Web Service** pointing to `S-Varunn/horai-backend`.
+2. Build Command: `npm install`
+3. Start Command: `npm run start:prod`
+4. Attach a PostgreSQL database and configure `DATABASE_URL`.
+
+### Docker
 ```bash
-# Install ngrok if needed: https://ngrok.com/download
-ngrok http 3000
+docker build -t horai-backend .
+docker run -p 3000:3000 --env-file .env horai-backend
 ```
-
-You'll get a URL like `https://abc123.ngrok.io`. Set it in `.env`:
-
-```
-BASE_URL=https://abc123.ngrok.io
-```
-
-Give this base URL to your Replit frontend. All API calls should go to `BASE_URL/api/...`.
 
 ---
 
-## API Reference
+## 📡 API Reference
 
-### Auth
+### 🔐 Authentication (`/api/auth`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/auth/register` | ❌ | Register (role: organizer \| collaborator) |
-| POST | `/api/auth/login` | ❌ | Login → returns JWT |
-| GET | `/api/auth/me` | ✅ | Get current user |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Public | Register new user (`organizer` \| `collaborator`) |
+| `POST` | `/api/auth/login` | Public | Login with email/password (returns JWT or triggers 2FA) |
+| `POST` | `/api/auth/verify-2fa` | Public | Verify 6-digit email 2FA code |
+| `GET` | `/api/auth/me` | User | Get current profile |
 
-### Organizations
+### 🏢 Organizations (`/api/orgs`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/api/orgs` | ✅ | List my orgs |
-| POST | `/api/orgs` | ✅ Organizer | Create org |
-| GET | `/api/orgs/:id` | ✅ Member | Get org details |
-| PATCH | `/api/orgs/:id` | ✅ Owner | Rename org |
-| GET | `/api/orgs/:id/members` | ✅ Member | List members |
-| POST | `/api/orgs/join/:invite_code` | ✅ | Join via invite link |
-| POST | `/api/orgs/:id/invite-links` | ✅ Owner | Generate invite link (7-day expiry) |
-| GET | `/api/orgs/:id/invite-links` | ✅ Owner | List invite links |
-| DELETE | `/api/orgs/:id/invite-links/:linkId` | ✅ Owner | Revoke invite link |
+|---|---|---|---|
+| `GET` | `/api/orgs` | User | List organizations user belongs to |
+| `POST` | `/api/orgs` | Organizer | Create organization |
+| `GET` | `/api/orgs/:id` | Member | Get organization details |
+| `PATCH` | `/api/orgs/:id` | Owner | Update organization name |
+| `DELETE` | `/api/orgs/:id` | Owner | Delete organization and all associated data |
+| `GET` | `/api/orgs/:id/members` | Member | List organization members |
+| `POST` | `/api/orgs/:id/invite-links`| Owner | Generate 7-day invite link |
+| `POST` | `/api/orgs/join/:invite_code` | User | Join organization via invite link |
 
-### Events
+### 📅 Events (`/api/events`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/orgs/:orgId/events` | ✅ Owner | Create event |
-| GET | `/api/orgs/:orgId/events` | ✅ Member | List events |
-| GET | `/api/events/:id` | ✅ Member | Get event + invitees |
-| PATCH | `/api/events/:id` | ✅ Owner | Update event |
-| PATCH | `/api/events/:id/lead` | ✅ Owner | Set lead collaborator |
-| DELETE | `/api/events/:id` | ✅ Owner | Delete event |
-| POST | `/api/events/:id/invite` | ✅ Owner | Invite collaborators |
-| PATCH | `/api/events/:id/rsvp` | ✅ | Accept/decline invitation |
-| POST | `/api/events/:id/complete` | ✅ Owner | Mark event complete (locks data) |
+|---|---|---|---|
+| `POST` | `/api/orgs/:orgId/events` | Owner | Create new event |
+| `GET` | `/api/orgs/:orgId/events` | Member | List events in organization |
+| `GET` | `/api/events/:id` | Member | Get event details, collaborators, and sessions |
+| `PATCH` | `/api/events/:id` | Owner | Update event details |
+| `DELETE` | `/api/events/:id` | Owner | Delete event |
+| `POST` | `/api/events/:id/invite` | Owner | Invite collaborators |
+| `PATCH` | `/api/events/:id/rsvp` | Invitee | Accept/decline event invite |
+| `POST` | `/api/events/:id/complete` | Owner | Mark event complete & finalize payroll |
 
-### Time Tracking
+### ⏱️ Time Tracking (`/api/events/:id/...`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/events/:id/sessions/start` | ✅ Lead | Start session |
-| POST | `/api/events/:id/sessions/stop` | ✅ Lead | Stop session (auto-calculates duration) |
-| GET | `/api/events/:id/sessions` | ✅ Member | List sessions + totals |
-| POST | `/api/events/:id/time` | ✅ Accepted | Add manual time entry |
-| GET | `/api/events/:id/time` | ✅ Member | List manual entries |
-| DELETE | `/api/time-entries/:id` | ✅ Owner | Delete own manual entry |
+|---|---|---|---|
+| `POST` | `/api/events/:id/sessions/start` | Lead/Owner | Start live event time session |
+| `POST` | `/api/events/:id/sessions/stop` | Lead/Owner | Stop live time session |
+| `GET` | `/api/events/:id/sessions` | Member | List recorded sessions |
+| `POST` | `/api/events/:id/time` | Accepted | Submit manual time entry |
+| `GET` | `/api/events/:id/time` | Member | List manual time entries |
+| `DELETE`| `/api/time-entries/:id` | Creator/Owner | Delete manual time entry |
 
-### Expenses
+### 💵 Expenses & Payroll (`/api/events/:id/...`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| POST | `/api/events/:id/expenses` | ✅ Accepted | Submit expense (driving / material / other) |
-| GET | `/api/events/:id/expenses` | ✅ Member | List all expenses |
-| DELETE | `/api/expenses/:id` | ✅ Owner | Delete own pending expense |
-| PATCH | `/api/expenses/:id/review` | ✅ Organizer | Approve / reject + comment |
+|---|---|---|---|
+| `POST` | `/api/events/:id/expenses` | Accepted | Submit driving, material, or general expense |
+| `GET` | `/api/events/:id/expenses` | Member | List event expenses |
+| `PATCH` | `/api/expenses/:id/review` | Organizer | Approve or reject expense |
+| `PUT` | `/api/events/:id/tips/:userId` | Owner | Set custom tip for collaborator |
+| `GET` | `/api/events/:id/summary` | Member | Compute complete payroll breakdown |
 
-### Tips & Payroll Summary
+### 🤖 Bot Gateways (`/api/whatsapp`, `/api/discord`, `/api/agent`)
 | Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| PUT | `/api/events/:id/tips/:userId` | ✅ Owner | Set/update tip for a collaborator |
-| GET | `/api/events/:id/tips` | ✅ Member | List all tips |
-| GET | `/api/events/:id/summary` | ✅ Member | Full payroll breakdown per collaborator |
+|---|---|---|---|
+| `GET` | `/api/whatsapp/status` | User | Get user WhatsApp connection status & pairing code |
+| `GET` | `/api/whatsapp/gateway-status` | Owner | Get WhatsApp socket gateway QR code & connection state |
+| `POST` | `/api/whatsapp/request-gateway-code` | Owner | Request 8-character phone pairing code |
+| `POST` | `/api/whatsapp/unlink` | User | Unlink user WhatsApp account |
+| `GET` | `/api/discord/status` | User | Get Discord account connection status & 6-digit code |
+| `POST` | `/api/discord/pairing-code` | User | Generate new Discord pairing code |
+| `POST` | `/api/discord/unlink` | User | Disconnect Discord account |
+| `POST` | `/api/agent/chat` | User | Web AI assistant query & tool execution |
 
 ---
 
-## Payroll Calculation
+## 🧮 Payroll Calculation Formula
 
 For each accepted collaborator on an event:
 
-| Component | Formula |
-|-----------|---------|
-| **Hours worked** | `(session_minutes + manual_minutes) / 60` |
-| **Base pay** | `hours_worked × event.hourly_rate` |
-| **Driver pay** | `hours_driven × event.hourly_rate` |
-| **Passenger pay** | `hours_driven × event.hourly_rate / 2` |
-| **Other expenses** | Sum of approved material + other expenses |
-| **Tip** | Organizer-set per collaborator |
-| **Total owed** | `base + driver + passenger + expenses + tip` |
+$$\text{Hours Worked} = \frac{\sum \text{Session Minutes} + \sum \text{Manual Minutes}}{60}$$
 
-> Only **approved** expenses are included in totals. The event cannot be marked complete while any expenses are still **pending**.
+$$\text{Base Pay} = \text{Hours Worked} \times \text{Hourly Rate}$$
+
+$$\text{Driving Pay} = (\text{Driver Hours} \times \text{Hourly Rate}) + (\text{Passenger Hours} \times \frac{\text{Hourly Rate}}{2})$$
+
+$$\text{Total Owed} = \text{Base Pay} + \text{Driving Pay} + \text{Approved Expenses} + \text{Tip}$$
 
 ---
 
-## JWT Authentication
+## 🧪 Testing
 
-All protected endpoints require:
-
+Run backend unit tests:
+```bash
+npm test
 ```
-Authorization: Bearer <token>
-```
-
-Tokens expire after 7 days (configurable via `JWT_EXPIRES_IN`).

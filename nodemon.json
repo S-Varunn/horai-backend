@@ -1,0 +1,15 @@
+{
+  "watch": [
+    "src/"
+  ],
+  "ignore": [
+    "data/*",
+    "data/**",
+    "whatsapp_auth/*",
+    "whatsapp_auth/**",
+    "src/db/whatsapp_auth/*",
+    "*.log",
+    "node_modules/*"
+  ],
+  "ext": "js,json"
+}

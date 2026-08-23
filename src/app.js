@@ -9,16 +9,17 @@ const eventRoutes = require('./routes/events');
 const sessionRoutes = require('./routes/sessions');
 const expenseRoutes = require('./routes/expenses');
 const summaryRoutes = require('./routes/summary');
+const { whatsappRouter } = require('./routes/whatsapp');
+const discordRoutes = require('./routes/discord');
+const agentRoutes = require('./routes/agent');
+const { initDiscordBot } = require('./services/discordBotService');
+const { initWhatsAppBot } = require('./services/whatsappBotService');
 
 const app = express();
 
 // ── CORS ──────────────────────────────────────────────────────────────────
-// Allows all origins by default; restrict via CORS_ORIGIN env var in production
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-}));
+app.use(cors());
+app.options('*', cors());
 
 app.use(express.json());
 
@@ -34,6 +35,9 @@ app.use('/api', eventRoutes);
 app.use('/api', sessionRoutes);
 app.use('/api', expenseRoutes);
 app.use('/api', summaryRoutes);
+app.use('/api/whatsapp', whatsappRouter);
+app.use('/api/discord', discordRoutes);
+app.use('/api/agent', agentRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -50,10 +54,16 @@ app.use((err, req, res, _next) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🕐 Timesheet Tracker API`);
+  console.log(`\n⏳ Horai API`);
   console.log(`   Running at: http://localhost:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Health check: http://localhost:${PORT}/health\n`);
+
+  // Initialize Discord Bot
+  initDiscordBot();
+
+  // Initialize Native WhatsApp Bot
+  initWhatsAppBot();
 });
 
 module.exports = app;

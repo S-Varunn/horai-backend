@@ -71,22 +71,40 @@ router.get('/events/:id', requireAuth, async (req, res, next) => {
   try {
     const event = await getEvent(req.params.id);
     if (!event) return res.status(404).json({ error: 'Event not found' });
-    if (!(await isMember(event.org_id, req.user.id))) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
 
-    const [lead, invitations] = await Promise.all([
+    const member = await isMember(event.org_id, req.user.id);
+    const org = await db('organizations').where({ id: event.org_id }).first();
+
+    const [lead, invitations, myInvitation] = await Promise.all([
       event.lead_collaborator_id
         ? db('users').where({ id: event.lead_collaborator_id }).select('id', 'name', 'email').first()
         : null,
+      member
+        ? db('event_invitations')
+            .join('users', 'event_invitations.user_id', 'users.id')
+            .where('event_invitations.event_id', req.params.id)
+            .select(
+              'users.id',
+              'users.name',
+              'users.email',
+              'event_invitations.status',
+              'event_invitations.invited_at',
+              'event_invitations.responded_at'
+            )
+        : [],
       db('event_invitations')
-        .join('users', 'event_invitations.user_id', 'users.id')
-        .where('event_invitations.event_id', req.params.id)
-        .select('users.id', 'users.name', 'users.email',
-          'event_invitations.status', 'event_invitations.invited_at', 'event_invitations.responded_at'),
+        .where({ event_id: req.params.id, user_id: req.user.id })
+        .first(),
     ]);
 
-    res.json({ ...event, lead_collaborator: lead, invitations });
+    res.json({
+      ...event,
+      org_name: org ? org.name : undefined,
+      is_member: member,
+      my_rsvp: myInvitation ? myInvitation.status : null,
+      lead_collaborator: lead,
+      invitations: invitations || [],
+    });
   } catch (err) { next(err); }
 });
 
@@ -250,10 +268,16 @@ router.post('/events/:id/join-request', requireAuth, async (req, res, next) => {
   try {
     const event = await getEvent(req.params.id);
     if (!event) return res.status(404).json({ error: 'Event not found' });
-    if (!(await isMember(event.org_id, req.user.id))) {
-      return res.status(403).json({ error: 'Not a member of this organization' });
-    }
     if (event.status === 'completed') return res.status(400).json({ error: 'Event is already completed' });
+
+    // Auto-add collaborator to organization if not already a member
+    const member = await isMember(event.org_id, req.user.id);
+    if (!member) {
+      await db('organization_members')
+        .insert({ org_id: event.org_id, user_id: req.user.id })
+        .onConflict(['org_id', 'user_id'])
+        .ignore();
+    }
 
     const existing = await db('event_invitations')
       .where({ event_id: req.params.id, user_id: req.user.id }).first();
@@ -330,6 +354,31 @@ router.post('/events/:id/complete', requireAuth, requireRole('organizer'), async
       .update({ status: 'completed', updated_at: new Date() })
       .returning('*');
     res.json(updated);
+  } catch (err) { next(err); }
+});
+
+// ── Delete event ───────────────────────────────────────────────────────────
+
+// DELETE /api/events/:id (Organizer only)
+router.delete('/events/:id', requireAuth, requireRole('organizer'), async (req, res, next) => {
+  try {
+    const event = await getEvent(req.params.id);
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+
+    if (!(await isEventOrganizer(req.params.id, req.user.id))) {
+      return res.status(403).json({ error: 'Not the organizer of this event' });
+    }
+
+    await db.transaction(async (trx) => {
+      await trx('collaborator_tips').where({ event_id: req.params.id }).del();
+      await trx('expenses').where({ event_id: req.params.id }).del();
+      await trx('collaborator_time_entries').where({ event_id: req.params.id }).del();
+      await trx('time_sessions').where({ event_id: req.params.id }).del();
+      await trx('event_invitations').where({ event_id: req.params.id }).del();
+      await trx('events').where({ id: req.params.id }).del();
+    });
+
+    res.json({ message: 'Event deleted successfully', id: req.params.id });
   } catch (err) { next(err); }
 });
 
