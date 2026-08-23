@@ -28,16 +28,35 @@ let currentQR = null;
 let currentQRDataUrl = null;
 let botStatus = 'disconnected'; // 'disconnected' | 'qr_ready' | 'connected'
 let connectedPhone = null;
+let reconnectTimer = null;
+const sentBotMessageIds = new Set();
 
 /**
- * Normalize incoming phone / JID to standard format (e.g. +1234567890 or 1234567890).
+ * Extract clean digits only from a JID or phone number (e.g. 15551234567:12@s.whatsapp.net -> 15551234567).
+ */
+function cleanDigits(jid) {
+  if (!jid) return '';
+  return String(jid).split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+/**
+ * Normalize incoming phone / JID to standard E.164 format (+1234567890).
  */
 function normalizePhone(jid) {
-  if (!jid) return '';
-  let clean = jid.replace(/@.*$/, '').trim();
-  const hasPlus = clean.startsWith('+');
-  clean = clean.replace(/\D/g, '');
-  return hasPlus ? `+${clean}` : clean;
+  const digits = cleanDigits(jid);
+  return digits ? `+${digits}` : '';
+}
+
+/**
+ * Helper to find user by phone number (matching with or without leading '+').
+ */
+async function findUserByPhone(phone) {
+  const digits = cleanDigits(phone);
+  if (!digits) return null;
+  return db('users')
+    .where('whatsapp_phone', digits)
+    .orWhere('whatsapp_phone', `+${digits}`)
+    .first();
 }
 
 /**
@@ -45,6 +64,11 @@ function normalizePhone(jid) {
  */
 async function initWhatsAppBot() {
   try {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
     if (!fs.existsSync(AUTH_DIR)) {
       fs.mkdirSync(AUTH_DIR, { recursive: true });
     }
@@ -115,7 +139,9 @@ async function initWhatsAppBot() {
                   console.log(`[WhatsApp Bot] Automatically paired organization owner (${owner.email}) with WhatsApp ${connectedPhone}`);
                 }
               }
-            } catch (e) {}
+            } catch (e) {
+              console.error('[WhatsApp Bot] Auto-link owner error:', e.message);
+            }
           })();
         }
       }
@@ -127,13 +153,12 @@ async function initWhatsAppBot() {
         botStatus = 'disconnected';
         connectedPhone = null;
 
-        // In production, only log abnormal disconnects (not routine 408 QR refresh timeouts)
         if (statusCode !== 408 || process.env.NODE_ENV !== 'production') {
           console.log(`⚠️ [WhatsApp Bot] Connection closed (code: ${statusCode || 'unknown'}). Reconnecting: ${shouldReconnect}`);
         }
 
         if (shouldReconnect) {
-          setTimeout(() => initWhatsAppBot(), 2000);
+          reconnectTimer = setTimeout(() => initWhatsAppBot(), 3000);
         } else {
           if (process.env.NODE_ENV !== 'production') {
             console.log('🔄 [WhatsApp Bot] Session reset. Cleaning auth directory and preparing fresh connection...');
@@ -141,15 +166,14 @@ async function initWhatsAppBot() {
           try {
             fs.rmSync(AUTH_DIR, { recursive: true, force: true });
           } catch (e) {}
-          setTimeout(() => initWhatsAppBot(), 1500);
+          reconnectTimer = setTimeout(() => initWhatsAppBot(), 2000);
         }
       }
     });
 
-    const sentBotMessageIds = new Set();
-
     async function sendBotReply(jid, content) {
       try {
+        if (!sock) return;
         const sent = await sock.sendMessage(jid, content);
         if (sent?.key?.id) {
           sentBotMessageIds.add(sent.key.id);
@@ -175,14 +199,14 @@ async function initWhatsAppBot() {
         if (msg.key.id && sentBotMessageIds.has(msg.key.id)) continue;
 
         const myJid = sock.user?.id || '';
-        const myCleanPhone = normalizePhone(myJid);
+        const myCleanDigits = cleanDigits(myJid);
         const senderJid = msg.key.remoteJid;
-        const cleanSender = normalizePhone(senderJid);
+        const cleanSenderDigits = cleanDigits(senderJid);
+        const cleanSenderFormatted = cleanSenderDigits ? `+${cleanSenderDigits}` : '';
 
-        const isSelfChat = cleanSender === myCleanPhone || senderJid === myJid;
+        const isSelfChat = cleanSenderDigits === myCleanDigits || senderJid.split('@')[0].split(':')[0] === myJid.split('@')[0].split(':')[0];
 
         // If fromMe is true, only allow if it is a Note to Self / Message Yourself chat
-        // Do not process fromMe messages in other normal chats (to avoid interfering with personal conversations)
         if (msg.key.fromMe && !isSelfChat) continue;
 
         // Extract message text from various Baileys message types
@@ -195,6 +219,8 @@ async function initWhatsAppBot() {
         ).trim();
 
         if (!rawText) continue;
+
+        console.log(`📩 [WhatsApp Inbound] from ${cleanSenderFormatted || senderJid} (${isSelfChat ? 'Self-Chat' : 'Direct'}): "${rawText}"`);
 
         const textUpper = rawText.toUpperCase();
 
@@ -217,13 +243,16 @@ async function initWhatsAppBot() {
           }
 
           // Unlink any existing account using this number
-          await db('users').where({ whatsapp_phone: cleanSender }).update({ whatsapp_phone: null });
+          await db('users')
+            .where('whatsapp_phone', cleanSenderDigits)
+            .orWhere('whatsapp_phone', cleanSenderFormatted)
+            .update({ whatsapp_phone: null });
 
           // Link phone to user
           await db('users')
             .where({ id: user.id })
             .update({
-              whatsapp_phone: cleanSender,
+              whatsapp_phone: cleanSenderFormatted,
               whatsapp_pairing_code: null,
               whatsapp_pairing_expires_at: null,
             });
@@ -236,7 +265,7 @@ async function initWhatsAppBot() {
 
         // 2. Handle Unlink Command: "UNPAIR"
         if (textUpper === 'UNPAIR') {
-          const user = await db('users').where({ whatsapp_phone: cleanSender }).first();
+          const user = await findUserByPhone(cleanSenderDigits);
           if (user) {
             await db('users').where({ id: user.id }).update({ whatsapp_phone: null });
             await sendBotReply(senderJid, { text: '✅ Your WhatsApp account has been unlinked from Horai.' });
@@ -249,13 +278,13 @@ async function initWhatsAppBot() {
         // 3. Handle Help Command: "HELP"
         if (textUpper === 'HELP') {
           await sendBotReply(senderJid, {
-            text: `🤖 *Horai Assistant Commands*\n\nTo talk to me, prefix your message with *Horai*, for example:\n• "Horai, whats the rate for Arangettram?"\n• "Horai, how much do I owe everyone?"\n• "Horai, who are the members of Arangettram?"\n• "Horai, log 4 hours on Arangettram for Sarah"\n• "Horai, start session for Arangettram"\n\n• *Unlink Account:* "UNPAIR"`,
+            text: `🤖 *Horai Assistant Commands*\n\nTo talk to me, ask questions or give instructions, for example:\n• "Whats the rate for Arangettram?"\n• "How much do I owe everyone?"\n• "Who are the members of Arangettram?"\n• "Log 4 hours on Arangettram for Sarah"\n• "Start session for Arangettram"\n\n• *Unlink Account:* "UNPAIR"`,
           });
           continue;
         }
 
         // 4. Verify User is Paired & check for Pending Confirmation
-        let user = await db('users').where({ whatsapp_phone: cleanSender }).first();
+        let user = await findUserByPhone(cleanSenderDigits);
 
         // If user is in self-chat and not yet linked, automatically associate with organization head
         if (!user && isSelfChat) {
@@ -263,7 +292,8 @@ async function initWhatsAppBot() {
           if (org?.owner_id) {
             user = await db('users').where({ id: org.owner_id }).first();
             if (user) {
-              await db('users').where({ id: user.id }).update({ whatsapp_phone: cleanSender });
+              await db('users').where({ id: user.id }).update({ whatsapp_phone: cleanSenderFormatted });
+              console.log(`[WhatsApp Bot] Auto-linked self-chat user (${user.email}) to ${cleanSenderFormatted}`);
             }
           }
         }
@@ -275,16 +305,16 @@ async function initWhatsAppBot() {
         const horaiPrefixMatch = rawText.match(/^(?:(?:@|!)?horai[\s,:]+|[!/])\s*(.*)$/i);
         const mentionsHorai = /\bhorai\b/i.test(rawText);
 
-        // In self-chat, allow direct questions OR questions mentioning Horai
-        // In external chats, require explicit Horai prefix or confirmation
+        // In self-chat or direct chats, allow direct questions
         if (!isSelfChat && !horaiPrefixMatch && !mentionsHorai && !isConfirmResponse) {
-          continue;
+          // If in a group or external chat without prefix, ignore
+          if (senderJid.endsWith('@g.us')) continue;
         }
 
         // 6. If user is not yet paired, invite them to link with their 6-digit code
         if (!user) {
           await sendBotReply(senderJid, {
-            text: `👋 Welcome to *Horai Assistant*!\n\nYour number (*${cleanSender}*) is not yet linked to a Horai account.\n\n*How to link:*\n1. Open your Horai web app.\n2. Click the WhatsApp icon in the header.\n3. Reply here with:\n👉 *PAIR <6-digit-code>*`,
+            text: `👋 Welcome to *Horai Assistant*!\n\nYour number (*${cleanSenderFormatted}*) is not yet linked to a Horai account.\n\n*How to link:*\n1. Open your Horai web app.\n2. Click the WhatsApp icon in the header.\n3. Reply here with:\n👉 *PAIR <6-digit-code>*`,
           });
           continue;
         }
@@ -300,6 +330,7 @@ async function initWhatsAppBot() {
 
         // 8. Execute Autonomous AI Agent Process
         try {
+          console.log(`🤖 [WhatsApp Agent Processing] prompt: "${cleanPrompt}" for user: ${user.name}`);
           const result = await processAgentMessage({
             user,
             message: cleanPrompt,
@@ -309,6 +340,7 @@ async function initWhatsAppBot() {
           await sendBotReply(senderJid, {
             text: result.reply,
           });
+          console.log(`💬 [WhatsApp Agent Replied]: "${result.reply.substring(0, 80)}..."`);
         } catch (agentErr) {
           console.error('[WhatsApp Agent Error]:', agentErr);
           await sendBotReply(senderJid, {
@@ -341,31 +373,59 @@ function getWhatsAppStatus() {
  * Completely avoids camera QR scanning and connection errors.
  */
 async function requestGatewayPairingCode(phone) {
-  const digitsOnly = String(phone || '').replace(/\D/g, '');
+  const digitsOnly = cleanDigits(phone);
   if (!digitsOnly || digitsOnly.length < 8) {
     throw new Error('Please enter a valid phone number with country code (e.g. +1234567890).');
   }
 
-  if (sock?.authState?.creds?.registered) {
-    throw new Error('WhatsApp Bot is already registered and connected.');
+  if (botStatus === 'connected' && sock?.authState?.creds?.registered) {
+    throw new Error(`WhatsApp Bot is already registered and connected as ${connectedPhone || 'active session'}.`);
   }
 
-  // Clear any partial QR auth state so clean pairing handshake occurs
+  // Clear existing socket before requesting pairing code to avoid conflicting WS instances
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners();
+      sock.ws?.close();
+      sock.end();
+    } catch (e) {}
+    sock = null;
+  }
+
   try {
     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
   } catch (e) {}
 
   await initWhatsAppBot();
 
-  // Wait for the socket to reach open WS state
+  // Wait for the socket to be initialized and in QR / connecting state
   let attempts = 0;
-  while ((!sock?.ws || sock.ws.readyState !== 1) && attempts < 50) {
-    await new Promise((r) => setTimeout(r, 200));
+  while (attempts < 35) {
+    if (sock?.requestPairingCode && (botStatus === 'qr_ready' || sock?.ws?.readyState === 1 || sock?.ws?.isOpen)) {
+      try {
+        const rawCode = await sock.requestPairingCode(digitsOnly);
+        const formatted = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
+        console.log(`🔑 [WhatsApp Bot] Pairing code generated for ${digitsOnly}: ${formatted}`);
+        return {
+          phone: `+${digitsOnly}`,
+          code: formatted,
+          raw_code: rawCode,
+        };
+      } catch (innerErr) {
+        // Socket may still be handshaking, wait a moment and retry loop
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400));
     attempts++;
   }
 
-  if (!sock || !sock.ws || sock.ws.readyState !== 1) {
-    throw new Error('WhatsApp service could not be initialized.');
+  if (!sock) {
+    throw new Error('WhatsApp service could not be initialized. Please verify internet connectivity.');
   }
 
   try {
@@ -378,24 +438,8 @@ async function requestGatewayPairingCode(phone) {
       raw_code: rawCode,
     };
   } catch (err) {
-    console.log('🔄 Retrying pairing code request with fresh socket:', err.message);
-    try {
-      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    } catch (e) {}
-    await initWhatsAppBot();
-    let retryAttempts = 0;
-    while ((!sock?.ws || sock.ws.readyState !== 1) && retryAttempts < 50) {
-      await new Promise((r) => setTimeout(r, 200));
-      retryAttempts++;
-    }
-    const rawCode = await sock.requestPairingCode(digitsOnly);
-    const formatted = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
-    console.log(`🔑 [WhatsApp Bot] Pairing code generated on retry for ${digitsOnly}: ${formatted}`);
-    return {
-      phone: `+${digitsOnly}`,
-      code: formatted,
-      raw_code: rawCode,
-    };
+    console.error('❌ [WhatsApp Bot] Pairing code generation error:', err);
+    throw new Error(err.message || 'Failed to request pairing code. Please try again.');
   }
 }
 
