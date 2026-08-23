@@ -89,8 +89,6 @@ async function initWhatsAppBot() {
           console.log('📱 ═══════════════════════════════════════════════════════════════\n');
           qrcodeTerminal.generate(qr, { small: true });
           console.log('\n👉 Open WhatsApp on your phone ➔ Settings ➔ Linked Devices ➔ Link a Device\n');
-        } else {
-          console.log('📱 [WhatsApp Bot] QR code generated/refreshed (available in Horai Web Dashboard).');
         }
       }
 
@@ -99,7 +97,7 @@ async function initWhatsAppBot() {
         currentQR = null;
         currentQRDataUrl = null;
         connectedPhone = normalizePhone(sock.user?.id || '');
-        console.log(`\n✅ [WhatsApp Bot] Connected successfully as ${connectedPhone || 'Horai Assistant'}!\n`);
+        console.log(`✅ [WhatsApp Bot] Connected successfully as ${connectedPhone || 'Horai Assistant'}`);
       }
 
       if (connection === 'close') {
@@ -109,12 +107,17 @@ async function initWhatsAppBot() {
         botStatus = 'disconnected';
         connectedPhone = null;
 
-        console.log(`⚠️ [WhatsApp Bot] Connection closed (code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
+        // In production, only log abnormal disconnects (not routine 408 QR refresh timeouts)
+        if (statusCode !== 408 || process.env.NODE_ENV !== 'production') {
+          console.log(`⚠️ [WhatsApp Bot] Connection closed (code: ${statusCode || 'unknown'}). Reconnecting: ${shouldReconnect}`);
+        }
 
         if (shouldReconnect) {
           setTimeout(() => initWhatsAppBot(), 2000);
         } else {
-          console.log('🔄 [WhatsApp Bot] Session reset. Cleaning auth directory and preparing fresh connection...');
+          if (process.env.NODE_ENV !== 'production') {
+            console.log('🔄 [WhatsApp Bot] Session reset. Cleaning auth directory and preparing fresh connection...');
+          }
           try {
             fs.rmSync(AUTH_DIR, { recursive: true, force: true });
           } catch (e) {}

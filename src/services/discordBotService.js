@@ -24,8 +24,8 @@ function initDiscordBot() {
     partials: [Partials.Channel, Partials.Message],
   });
 
-  client.once('ready', () => {
-    console.log(`🤖 [Discord Bot] Logged in as ${client.user.tag}! Ready to handle Horai timesheets.`);
+  client.once('clientReady', () => {
+    console.log(`🤖 [Discord Bot] Logged in as ${client.user.tag}`);
   });
 
   client.on('messageCreate', async (message) => {

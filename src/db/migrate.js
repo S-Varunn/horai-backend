@@ -13,19 +13,15 @@ async function runMigrations() {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`[DB Migration] Connecting to database (Attempt ${attempt}/${maxRetries})...`);
       await db.raw('SELECT 1');
-      console.log(`[DB Migration] Database connected successfully! Running knex.migrate.latest()...`);
       
       const [batchNo, log] = await db.migrate.latest({
         directory: __dirname + '/migrations',
         tableName: 'knex_migrations',
       });
 
-      if (log.length === 0) {
-        console.log(`[DB Migration] Database schema is already up to date.`);
-      } else {
-        console.log(`[DB Migration] Successfully applied Batch ${batchNo}:`, log);
+      if (log.length > 0) {
+        console.log(`[DB Migration] Applied Batch ${batchNo}:`, log);
       }
 
       await db.destroy();
