@@ -83,11 +83,15 @@ async function initWhatsAppBot() {
           currentQRDataUrl = null;
         }
 
-        console.log('\n📱 ═══════════════════════════════════════════════════════════════');
-        console.log('📱  SCAN THIS QR CODE IN WHATSAPP TO CONNECT HORAI ASSISTANT:');
-        console.log('📱 ═══════════════════════════════════════════════════════════════\n');
-        qrcodeTerminal.generate(qr, { small: true });
-        console.log('\n👉 Open WhatsApp on your phone ➔ Settings ➔ Linked Devices ➔ Link a Device\n');
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('\n📱 ═══════════════════════════════════════════════════════════════');
+          console.log('📱  SCAN THIS QR CODE IN WHATSAPP TO CONNECT HORAI ASSISTANT:');
+          console.log('📱 ═══════════════════════════════════════════════════════════════\n');
+          qrcodeTerminal.generate(qr, { small: true });
+          console.log('\n👉 Open WhatsApp on your phone ➔ Settings ➔ Linked Devices ➔ Link a Device\n');
+        } else {
+          console.log('📱 [WhatsApp Bot] QR code generated/refreshed (available in Horai Web Dashboard).');
+        }
       }
 
       if (connection === 'open') {
