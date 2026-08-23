@@ -1,12 +1,12 @@
 /**
  * @file whatsappBotService.js
- * @description Complete, ground-up rewrite of the Native WhatsApp Gateway using Baileys.
+ * @description Built-in Native WhatsApp Gateway using Baileys.
  * Features:
  * - Direct QR code generation (terminal + Base64 PNG for UI)
  * - 8-character phone pairing code generation (requestPairingCode)
- * - Rock-solid self-chat (Message Yourself) & direct chat AI message execution
+ * - Native LID (Linked Device ID) & phone number self-chat (Message Yourself) detection
  * - Automated owner auto-pairing and 6-digit member code pairing
- * - Robust connection management & reconnection logic
+ * - Robust error handling and fallback JID messaging
  */
 
 const path = require('path');
@@ -41,6 +41,7 @@ const processedMessageIds = new Set();
 /**
  * Strip all non-digit characters and device IDs from a WhatsApp JID or phone number.
  * e.g., "15551234567:12@s.whatsapp.net" -> "15551234567"
+ *       "181956960641072:0@lid" -> "181956960641072"
  *       "+1 (555) 123-4567" -> "15551234567"
  */
 function extractDigits(raw) {
@@ -199,9 +200,22 @@ async function initWhatsAppBot() {
             processedMessageIds.delete(oldest);
           }
         }
+        console.log(`📤 [WhatsApp Sent] to ${jid} (msgId: ${sent?.key?.id})`);
         return sent;
       } catch (err) {
-        console.error('[WhatsApp Bot] Reply error:', err.message);
+        console.error(`❌ [WhatsApp Send Error] to ${jid}:`, err.message);
+        // Fallback: If sending to LID failed, retry with primary user JID
+        if (jid.endsWith('@lid') && sock.user?.id) {
+          try {
+            const fallbackJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            console.log(`🔄 Retrying send with fallback JID: ${fallbackJid}`);
+            const sent = await sock.sendMessage(fallbackJid, { text });
+            if (sent?.key?.id) processedMessageIds.add(sent.key.id);
+            return sent;
+          } catch (fallbackErr) {
+            console.error(`❌ [WhatsApp Fallback Send Error]:`, fallbackErr.message);
+          }
+        }
       }
     }
 
@@ -217,16 +231,22 @@ async function initWhatsAppBot() {
 
         const senderJid = msg.key.remoteJid;
         const myJid = sock?.user?.id || '';
+        const myLid = sock?.user?.lid || '';
 
-        const myDigits = extractDigits(myJid);
+        const myPhoneDigits = extractDigits(myJid);
+        const myLidDigits = extractDigits(myLid);
         const senderDigits = extractDigits(senderJid);
         const senderFormatted = formatE164(senderDigits);
 
-        // Accurate Self-Chat detection (messaging oneself / note to self)
-        const isSelfChat = senderDigits === myDigits || senderJid.split('@')[0].split(':')[0] === myJid.split('@')[0].split(':')[0];
-
-        // If fromMe is true, only allow if it is a Self-Chat (skip sent messages in normal 1-on-1 external chats)
-        if (msg.key.fromMe && !isSelfChat) continue;
+        // Detect Self-Chat across phone numbers, multi-device LIDs, and fromMe flags
+        const isSelfChat =
+          msg.key.fromMe === true ||
+          (myPhoneDigits && senderDigits === myPhoneDigits) ||
+          (myLidDigits && senderDigits === myLidDigits) ||
+          senderJid === myJid ||
+          senderJid === myLid ||
+          senderJid.startsWith(myPhoneDigits) ||
+          (myLidDigits && senderJid.startsWith(myLidDigits));
 
         // Extract message text from text, image caption, video caption, or extended text
         const rawText = (
@@ -239,7 +259,7 @@ async function initWhatsAppBot() {
 
         if (!rawText) continue;
 
-        console.log(`📩 [WhatsApp Inbound] from ${senderFormatted || senderJid} (${isSelfChat ? 'Self-Chat' : 'Chat'}): "${rawText}"`);
+        console.log(`📩 [WhatsApp Inbound] from ${senderFormatted || senderJid} (${isSelfChat ? 'Self-Chat' : 'Direct'}): "${rawText}"`);
 
         const textUpper = rawText.toUpperCase();
 
@@ -272,7 +292,7 @@ async function initWhatsAppBot() {
           await db('users')
             .where({ id: user.id })
             .update({
-              whatsapp_phone: senderFormatted,
+              whatsapp_phone: senderFormatted || formatE164(connectedPhone),
               whatsapp_pairing_code: null,
               whatsapp_pairing_expires_at: null,
             });
@@ -286,7 +306,9 @@ async function initWhatsAppBot() {
 
         // 2. Unpair Command: "UNPAIR"
         if (textUpper === 'UNPAIR') {
-          const user = await findUserByPhone(senderDigits);
+          const user = isSelfChat
+            ? await (connectedPhone ? findUserByPhone(connectedPhone) : db('users').first())
+            : await findUserByPhone(senderDigits);
           if (user) {
             await db('users').where({ id: user.id }).update({ whatsapp_phone: null });
             await replyToChat(senderJid, '✅ Your WhatsApp account has been unlinked from Horai.');
@@ -306,18 +328,22 @@ async function initWhatsAppBot() {
         }
 
         // 4. Resolve User
-        let user = await findUserByPhone(senderDigits);
-
-        // If self-chat and not yet explicitly paired, associate with organization owner
-        if (!user && isSelfChat) {
-          const org = await db('organizations').orderBy('created_at', 'asc').first();
-          if (org?.owner_id) {
-            user = await db('users').where({ id: org.owner_id }).first();
-            if (user) {
-              await db('users').where({ id: user.id }).update({ whatsapp_phone: senderFormatted });
-              console.log(`[WhatsApp Bot] Auto-linked self-chat to owner (${user.email})`);
+        let user = null;
+        if (isSelfChat) {
+          if (connectedPhone) {
+            user = await findUserByPhone(connectedPhone);
+          }
+          if (!user) {
+            const org = await db('organizations').orderBy('created_at', 'asc').first();
+            if (org?.owner_id) {
+              user = await db('users').where({ id: org.owner_id }).first();
+              if (user && connectedPhone) {
+                await db('users').where({ id: user.id }).update({ whatsapp_phone: connectedPhone });
+              }
             }
           }
+        } else {
+          user = await findUserByPhone(senderDigits);
         }
 
         const pendingAction = user ? getPendingAction(user.id) : null;
@@ -331,7 +357,7 @@ async function initWhatsAppBot() {
           if (senderJid.endsWith('@g.us')) continue; // Ignore unrelated group chatter
         }
 
-        // 6. If user is still not registered
+        // 6. If user is still not registered and not self-chat
         if (!user) {
           await replyToChat(
             senderJid,
@@ -351,7 +377,7 @@ async function initWhatsAppBot() {
 
         // 8. Process Message through AI Agent
         try {
-          console.log(`🤖 [WhatsApp AI] Processing: "${cleanPrompt}" for ${user.name}`);
+          console.log(`🤖 [WhatsApp AI] Processing: "${cleanPrompt}" for user ${user.name} (${user.email})`);
           const result = await processAgentMessage({
             user,
             message: cleanPrompt,
