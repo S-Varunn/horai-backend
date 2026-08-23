@@ -5,7 +5,7 @@
 
 const db = require('../../../db/knex');
 const { computeEventSummary } = require('../../payroll');
-const { canUserManageEvent, findEvent, findUserInOrg } = require('../resolvers');
+const { canUserManageEvent, findEvent, findUserInOrg, isOrgHead } = require('../resolvers');
 const { setPendingAction } = require('../confirmation');
 
 async function handleSetTip(args, { user, org, skipConfirmation }) {
@@ -175,6 +175,13 @@ async function handleGetCollaboratorTimesheet(args, { org, user }) {
   if (nameRaw && !/^(me|myself|i|my|mine)$/i.test(nameRaw)) {
     targetUser = await findUserInOrg(org.id, args.collaborator_name_or_email);
     if (!targetUser) return { error: `Collaborator "${args.collaborator_name_or_email}" not found in organization.` };
+  }
+
+  // Privacy restriction: Non-organizers can only view their own payout details
+  if (!isOrgHead(user, org) && targetUser.id !== user.id) {
+    return {
+      error: `⛔ Privacy Restriction: You can only view your own hours and payout details. To check ${targetUser.name}'s payout, please ask the organization organizer.`,
+    };
   }
 
   // Case 1: Specific event requested

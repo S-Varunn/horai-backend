@@ -451,6 +451,27 @@ function fallbackRuleBasedParser({ messages }) {
     };
   }
 
+  // 6b. Person's Pay/Earnings query: "What is my friend Tharun Kumar's pay?", "What is Tharun's pay?", "What is Sarah's rate?"
+  const someonePayMatch = rawText.match(
+    /(?:what\s+(?:is|are)|how\s+much\s+(?:is|does|will|gets)|show|check|get)\s+(?:my\s+(?:friend|colleague|coworker|member)\s+)?(["']?[a-zA-Z0-9\s_@.-]+?["']?)(?:'s|’s|\s+is|\s+will\s+be|\s+gets)?\s+(?:pay|rate|hours|earnings|timesheet|wage|payout|compensation)(?:\?)?$/i
+  );
+  if (someonePayMatch) {
+    const rawTarget = someonePayMatch[1].replace(/["']/g, '').trim();
+    return {
+      content: '',
+      tool_calls: [
+        {
+          id: 'call_fallback_someone_pay',
+          type: 'function',
+          function: {
+            name: 'get_collaborator_timesheet',
+            arguments: JSON.stringify({ collaborator_name_or_email: rawTarget }),
+          },
+        },
+      ],
+    };
+  }
+
   // 7. Overall Payroll Summary / What do I owe everyone:
   if (
     /(?:how\s+much\s+(?:do\s+i|should\s+i|to)\s+owe(?:\s+everyone|\s+all|\s+people)?|what\s+do\s+i\s+owe(?:\s+everyone|\s+all)?|payroll\s+summary|total\s+payroll|total\s+owed\s+across|payouts\s+summary|how\s+much\s+money\s+do\s+i\s+owe)/i.test(
