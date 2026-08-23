@@ -72,7 +72,15 @@ async function handleRemoveTip(args, { user, org, skipConfirmation }) {
   };
 }
 
-async function handleGetPayrollSummary(args, { org }) {
+async function handleGetPayrollSummary(args, { org, user }) {
+  // Non-organizers only see their own payout breakdown
+  if (!isOrgHead(user, org)) {
+    return await handleGetCollaboratorTimesheet(
+      { collaborator_name_or_email: 'me', event_identifier: args.event_identifier },
+      { org, user }
+    );
+  }
+
   // Case 1: Specific single event requested
   if (args.event_identifier && !/^(all|everyone|org|organization|total|overall)$/i.test(args.event_identifier.trim())) {
     const event = await findEvent(org.id, args.event_identifier);

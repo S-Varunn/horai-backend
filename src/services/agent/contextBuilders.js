@@ -36,6 +36,28 @@ async function buildEventFullContext(event, user, org) {
   const joinLink = `${baseUrl}/events/${event.id}`;
   const activeSession = sessions.find((s) => !s.stopped_at);
 
+  const isOwnerOrLead =
+    org?.owner_id === user?.id || user?.role === 'organizer' || event.lead_collaborator_id === user?.id;
+
+  // Filter sensitive member data: collaborators only see their own logs & payout
+  const filteredManualEntries = isOwnerOrLead
+    ? manualEntries
+    : manualEntries.filter((e) => e.user_id === user?.id);
+
+  const filteredExpenses = isOwnerOrLead
+    ? expenses
+    : expenses.filter((exp) => exp.user_id === user?.id);
+
+  const filteredTips = isOwnerOrLead
+    ? tips
+    : tips.filter((t) => t.user_id === user?.id);
+
+  const filteredCollabs = isOwnerOrLead
+    ? summary.collaborators
+    : summary.collaborators.filter((c) => c.user.id === user?.id);
+
+  const userPayoutTotal = filteredCollabs.reduce((acc, c) => acc + (c.breakdown.total_owed || 0), 0);
+
   return {
     event: {
       id: event.id,
@@ -57,8 +79,8 @@ async function buildEventFullContext(event, user, org) {
     })),
     time_tracking: {
       total_sessions_count: sessions.length,
-      manual_entries_count: manualEntries.length,
-      manual_entries: manualEntries.map((e) => ({
+      manual_entries_count: filteredManualEntries.length,
+      manual_entries: filteredManualEntries.map((e) => ({
         collaborator: e.user_name,
         hours: (e.minutes_worked / 60).toFixed(1),
         minutes: e.minutes_worked,
@@ -67,8 +89,8 @@ async function buildEventFullContext(event, user, org) {
       })),
     },
     expenses: {
-      total_count: expenses.length,
-      items: expenses.map((exp) => ({
+      total_count: filteredExpenses.length,
+      items: filteredExpenses.map((exp) => ({
         collaborator: exp.user_name,
         type: exp.type,
         status: exp.status,
@@ -78,14 +100,14 @@ async function buildEventFullContext(event, user, org) {
         description: exp.description,
       })),
     },
-    tips: tips.map((t) => ({
+    tips: filteredTips.map((t) => ({
       collaborator: t.user_name,
       amount: t.tip_amount,
       notes: t.notes,
     })),
     payroll_and_payout_breakdown: {
-      grand_total: summary.grand_total,
-      collaborators: summary.collaborators.map((c) => ({
+      grand_total: isOwnerOrLead ? summary.grand_total : userPayoutTotal,
+      collaborators: filteredCollabs.map((c) => ({
         name: c.user.name,
         email: c.user.email,
         hours_worked: c.breakdown.hours_worked,
